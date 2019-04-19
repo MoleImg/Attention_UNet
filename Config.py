@@ -1,12 +1,14 @@
 '''
 TODO:
     Configurations for Attention gated residual UNet
+    on spatial-level or channel-level
     Hyper parameters
 '''
 
 __author__ = 'MoleImg'
 
 # Main thread controllers
+MODEL_NAME = 'AttentionSEResUNet'   # AttentionResUNet/AttentionSEResUNet
 TRAIN_FLAG = False # if training
 TEST_FLAG = True # if test
 MODEL_SAVE_FLAG = False # if saving model

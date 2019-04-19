@@ -4,14 +4,14 @@ TODO:
     Data import & training & test for the model
 """
 
-__author__ = 'ACM'
+__author__ = 'MoleImg'
 
 # import os
 # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import argparse
 
 
-from AttResUNet import Attention_ResUNet
+from AttResUNet import Attention_ResUNet, AttentionSEResUNet
 from tensorflow.contrib.keras import optimizers, callbacks
 import Config as conf
 
@@ -21,9 +21,13 @@ if conf.TRAIN_FLAG:
         conf.TRAIN_DATA_PATH, conf.TRAINING_SIZE, start_num=conf.TRAINING_START)
 
     # model constrconftion
-    model = Attention_ResUNet(dropout_rate=conf.DROPOUT_RATE, batch_norm=conf.BATCH_NORM_FLAG)
+    if conf.MODEL_NAME = 'AttentionSEResUNet':  # adding channel-level attention: SENet
+        model = AttentionSEResUNet(dropout_rate=conf.DROPOUT_RATE,
+                                   batch_norm=conf.BATCH_NORM_FLAG)
+    else:   # using spatial-level attention
+        model = Attention_ResUNet(dropout_rate=conf.DROPOUT_RATE,
+                                  batch_norm=conf.BATCH_NORM_FLAG)
     if conf.MODEL_LOAD_FLAG:
-        # model.load_weights(conf.MODEL_LOAD_PATH)
         model.load_weights(conf.MODEL_LOAD_PATH)
     # training setup
     optimizer = optimizers.Adam() # training optimizer

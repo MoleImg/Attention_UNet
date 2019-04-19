@@ -1,28 +1,18 @@
 # coding: utf-8
 '''
+TODO:
+    using attention gate on both spatial and channel dimensions
 Dependencies:
     Keras 2.0.8
     Tensorflow 1.3.0
-    Config
-
-Usage:
-from keras.optimizers import Adam
-
-model = Attention_ResUNet()
-model.load_weights(weights_filename) # optional
-optim = Adam() # optimizer
-loss = dice_coef_loss # loss function
-metrics = [dice_coef]
-model.compile(optimizer=optim, loss=dice_coef_loss, metrics=[dice_coef]) # configuration
-
-model.fit(...)
+    UNetConfig
 '''
-__author__ = 'MoleImg'
+__author__ = 'ACM'
 import tensorflow as tf
 from tensorflow.contrib.keras import models, layers, regularizers
 from tensorflow.contrib.keras import backend as K
 
-import Config as conf
+import UNetConfig as uc
 
 '''
 Hyper-parameters
@@ -36,31 +26,8 @@ FILTER_NUM = uc.FILTER_NUM # number of basic filters for the first layer
 FILTER_SIZE = uc.FILTER_SIZE # size of the convolutional filter
 DOWN_SAMP_SIZE = uc.DOWN_SAMP_SIZE # size of pooling filters
 UP_SAMP_SIZE = uc.UP_SAMP_SIZE # size of upsampling filters
+SE_RATIO = uc.SE_RATIO   # reduction ratio of SE block
 
-'''
-Definitions of loss and evaluation metrices
-'''
-
-def dice_coef(y_true, y_pred):
-    y_true_f = K.flatten(y_true)
-    y_pred_f = K.flatten(y_pred)
-    intersection = K.sum(y_true_f * y_pred_f)
-    return (2.0 * intersection + 1.0) / (K.sum(y_true_f) + K.sum(y_pred_f) + 1.0)
-
-
-def jacard_coef(y_true, y_pred):
-    y_true_f = K.flatten(y_true)
-    y_pred_f = K.flatten(y_pred)
-    intersection = K.sum(y_true_f * y_pred_f)
-    return (intersection + 1.0) / (K.sum(y_true_f) + K.sum(y_pred_f) - intersection + 1.0)
-
-
-def jacard_coef_loss(y_true, y_pred):
-    return -jacard_coef(y_true, y_pred)
-
-
-def dice_coef_loss(y_true, y_pred):
-    return -dice_coef(y_true, y_pred)
 
 
 def expend_as(tensor, rep):
@@ -101,6 +68,29 @@ def double_conv_layer(x, filter_size, size, dropout, batch_norm=False):
     res_path = layers.add([shortcut, conv])
     return res_path
 
+def SE_block(x, out_dim, ratio, name, batch_norm=False):
+    """
+    self attention squeeze-excitation block, attention mechanism on channel dimension
+    :param x: input feature map
+    :return: attention weighted on channel dimension feature map
+    """
+    # Squeeze: global average pooling
+    x_s = layers.GlobalAveragePooling2D(data_format=None)(x)
+    # Excitation: bottom-up top-down FCs
+    if batch_norm:
+        x_s = layers.BatchNormalization()(x_s)
+    x_e = layers.Dense(units=out_dim//ratio)(x_s)
+    x_e = layers.Activation('relu')(x_e)
+    if batch_norm:
+        x_e = layers.BatchNormalization()(x_e)
+    x_e = layers.Dense(units=out_dim)(x_e)
+    x_e = layers.Activation('sigmoid')(x_e)
+    x_e = layers.Reshape((1, 1, out_dim), name=name+'channel_weight')(x_e)
+    result = layers.multiply([x, x_e])
+    return result
+
+
+
 def gating_signal(input, out_size, batch_norm=False):
     """
     resize the down layer feature map into the same dimension as the up layer feature map
@@ -115,7 +105,16 @@ def gating_signal(input, out_size, batch_norm=False):
     x = layers.Activation('relu')(x)
     return x
 
-def attention_block(x, gating, inter_shape):
+def attention_block(x, gating, inter_shape, name):
+    """
+    self gated attention, attention mechanism on spatial dimension
+    :param x: input feature map
+    :param gating: gate signal, feature map from the lower layer
+    :param inter_shape: intermedium channle numer
+    :param name: name of attention layer, for output
+    :return: attention weighted on spatial dimension feature map
+    """
+
     shape_x = K.int_shape(x)
     shape_g = K.int_shape(gating)
 
@@ -126,15 +125,19 @@ def attention_block(x, gating, inter_shape):
     upsample_g = layers.Conv2DTranspose(inter_shape, (3, 3),
                                  strides=(shape_theta_x[1] // shape_g[1], shape_theta_x[2] // shape_g[2]),
                                  padding='same')(phi_g)  # 16
+    # upsample_g = layers.UpSampling2D(size=(shape_theta_x[1] // shape_g[1], shape_theta_x[2] // shape_g[2]),
+    #                                  data_format="channels_last")(phi_g)
 
     concat_xg = layers.add([upsample_g, theta_x])
     act_xg = layers.Activation('relu')(concat_xg)
     psi = layers.Conv2D(1, (1, 1), padding='same')(act_xg)
     sigmoid_xg = layers.Activation('sigmoid')(psi)
     shape_sigmoid = K.int_shape(sigmoid_xg)
-    upsample_psi = layers.UpSampling2D(size=(shape_x[1] // shape_sigmoid[1], shape_x[2] // shape_sigmoid[2]))(sigmoid_xg)  # 32
+    upsample_psi = layers.UpSampling2D(size=(shape_x[1] // shape_sigmoid[1], shape_x[2] // shape_sigmoid[2]),
+                                       name=name+'_weight')(sigmoid_xg)  # 32
 
     upsample_psi = expend_as(upsample_psi, shape_x[3])
+
 
     y = layers.multiply([upsample_psi, x])
 
@@ -143,7 +146,7 @@ def attention_block(x, gating, inter_shape):
     return result_bn
 
 
-def Attention_ResUNet(dropout_rate=0.0, batch_norm=True):
+def Attention_ResUNet_PA(dropout_rate=0.0, batch_norm=True):
     '''
     Rsidual UNet construction, with attention gate
     convolution: 3*3 SAME padding
@@ -178,27 +181,47 @@ def Attention_ResUNet(dropout_rate=0.0, batch_norm=True):
     conv_8 = double_conv_layer(pool_8, FILTER_SIZE, 16*FILTER_NUM, dropout_rate, batch_norm)
 
     # Upsampling layers
+
     # UpRes 6, attention gated concatenation + upsampling + double residual convolution
+    # channel attention block
+    se_conv_16 = SE_block(conv_16, out_dim=8*FILTER_NUM, ratio=SE_RATIO, name='att_16')
+    # spatial attention block
     gating_16 = gating_signal(conv_8, 8*FILTER_NUM, batch_norm)
-    att_16 = attention_block(conv_16, gating_16, 8*FILTER_NUM)
+    att_16 = attention_block(se_conv_16, gating_16, 8*FILTER_NUM, name='att_16')
+    # attention re-weight & concatenate
     up_16 = layers.UpSampling2D(size=(UP_SAMP_SIZE, UP_SAMP_SIZE), data_format="channels_last")(conv_8)
     up_16 = layers.concatenate([up_16, att_16], axis=axis)
     up_conv_16 = double_conv_layer(up_16, FILTER_SIZE, 8*FILTER_NUM, dropout_rate, batch_norm)
+
     # UpRes 7
+    # channel attention block
+    se_conv_32 = SE_block(conv_32, out_dim=4*FILTER_NUM, ratio=SE_RATIO, name='att_32')
+    # spatial attention block
     gating_32 = gating_signal(up_conv_16, 4*FILTER_NUM, batch_norm)
-    att_32 = attention_block(conv_32, gating_32, 4*FILTER_NUM)
+    att_32 = attention_block(se_conv_32, gating_32, 4*FILTER_NUM, name='att_32')
+    # attention re-weight & concatenate
     up_32 = layers.UpSampling2D(size=(UP_SAMP_SIZE, UP_SAMP_SIZE), data_format="channels_last")(up_conv_16)
     up_32 = layers.concatenate([up_32, att_32], axis=axis)
     up_conv_32 = double_conv_layer(up_32, FILTER_SIZE, 4*FILTER_NUM, dropout_rate, batch_norm)
+
     # UpRes 8
+    # channel attention block
+    se_conv_64 = SE_block(conv_64, out_dim=2*FILTER_NUM, ratio=SE_RATIO, name='att_64')
+    # spatial attention block
     gating_64 = gating_signal(up_conv_32, 2*FILTER_NUM, batch_norm)
-    att_64 = attention_block(conv_64, gating_64, 2*FILTER_NUM)
+    att_64 = attention_block(se_conv_64, gating_64, 2*FILTER_NUM, name='att_64')
+    # attention re-weight & concatenate
     up_64 = layers.UpSampling2D(size=(UP_SAMP_SIZE, UP_SAMP_SIZE), data_format="channels_last")(up_conv_32)
     up_64 = layers.concatenate([up_64, att_64], axis=axis)
     up_conv_64 = double_conv_layer(up_64, FILTER_SIZE, 2*FILTER_NUM, dropout_rate, batch_norm)
+
     # UpRes 9
+    # channel attention block
+    se_conv_128 = SE_block(conv_128, out_dim=FILTER_NUM, ratio=SE_RATIO, name='att_128')
+    # spatial attention block
     gating_128 = gating_signal(up_conv_64, FILTER_NUM, batch_norm)
-    att_128 = attention_block(conv_128, gating_128, FILTER_NUM)
+    # attention re-weight & concatenate
+    att_128 = attention_block(se_conv_128, gating_128, FILTER_NUM, name='att_128')
     up_128 = layers.UpSampling2D(size=(UP_SAMP_SIZE, UP_SAMP_SIZE), data_format="channels_last")(up_conv_64)
     up_128 = layers.concatenate([up_128, att_128], axis=axis)
     up_conv_128 = double_conv_layer(up_128, FILTER_SIZE, FILTER_NUM, dropout_rate, batch_norm)
@@ -212,7 +235,7 @@ def Attention_ResUNet(dropout_rate=0.0, batch_norm=True):
     conv_final = layers.Activation('relu')(conv_final)
 
     # Model integration
-    model = models.Model(inputs, conv_final, name="AttentionResUNet")
+    model = models.Model(inputs, conv_final, name="AttentionSEResUNet")
     return model
 
 
