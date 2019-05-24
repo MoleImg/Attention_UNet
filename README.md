@@ -1,6 +1,6 @@
 Attention_UNet
 ==============
-Raw implementation of attention gated U-Net by Keras. Including:<br>
+Raw implementation of attention gated U-Net using Keras. Including:<br>
 
 AttentionResUNet: <br>
 ------------------
